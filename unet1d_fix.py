@@ -593,6 +593,7 @@ class Unet1d(nn.Module):
             mask = None
             cond_x += self.encoder_pos
             cond_x = self.mask_encoder(cond_x)
+            cond_x += self.decoder_pos
             decoder_x = self.mask_decoder(cond_x)
         else:
             num_masked_tokens = int(np.ceil(self.dim * cur_mask_ratio))

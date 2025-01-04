@@ -4,14 +4,14 @@ import torch.nn.functional as F
 import numpy as np
 from data import Task1Data
 from torch.utils.data.dataloader import DataLoader
-from unet1d import Unet1d
+from unet1d_fix import Unet1d
 from ddpm_conditional import Diffusion
 from torch.utils.tensorboard import SummaryWriter
 from modules import EMA
 import os
 import copy
 
-name = "mask_bugfix5_old"
+name = "mask_bugfix7_fix_resume"
 log_dir = f"log_{name}"
 checkpoint_dir = f"./checkpoint/checkpoint_{name}"
 
@@ -28,11 +28,14 @@ writer = SummaryWriter(log_dir=log_dir)
 train_dataset = Task1Data(is_train=True)
 train_loader = DataLoader(train_dataset, batch_size=512,num_workers=8)
 model = Unet1d(64,dim_mults = (1,2,4)) # 
+resume_epoch = 0
 
 # resume 
-# checkpoint = torch.load("best_model.pth", map_location='cpu')
-# model.load_state_dict(checkpoint)
-#
+checkpoint_dir_resume = f"./checkpoint/checkpoint_mask_bugfix7_fix"
+checkpoint = torch.load(f"{checkpoint_dir_resume}/last_model.pth", map_location='cpu')
+model.load_state_dict(checkpoint['model'])
+resume_epoch = 10000
+
 model.cuda().train()
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 diffusion = Diffusion(noise_steps=1000,img_size=64, device=device)
@@ -43,7 +46,7 @@ ema_model = copy.deepcopy(model).eval().requires_grad_(False)
 
 best_train_loss = 99999.
 
-for epoch_counter in range(10000):
+for epoch_counter in range(resume_epoch, resume_epoch+10000):
     n_steps = 50
     total_train_loss = 0.
     total_val_loss = 0.

@@ -4,14 +4,14 @@ import torch.nn.functional as F
 import numpy as np
 from data import Task1Data
 from torch.utils.data.dataloader import DataLoader
-from unet1d import Unet1d
+from unet1d_ft import Unet1d
 from ddpm_conditional import Diffusion
 from torch.utils.tensorboard import SummaryWriter
 from modules import EMA
 import os
 import copy
 
-name = "mask_bugfix5_old"
+name = "mask_bugfix8_useEnc2"
 log_dir = f"log_{name}"
 checkpoint_dir = f"./checkpoint/checkpoint_{name}"
 

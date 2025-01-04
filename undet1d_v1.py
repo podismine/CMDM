@@ -462,7 +462,6 @@ class Unet1d(nn.Module):
         self.channels = channels
         self.self_condition = self_condition
         input_channels = channels
-
         self.fine_tuning = fine_tuning
 
         init_dim = default(init_dim, dim)
@@ -546,12 +545,10 @@ class Unet1d(nn.Module):
 
         self.final_res_block = block_klass(dim * 2, dim, time_emb_dim = time_dim)
         self.final_conv = nn.Conv1d(dim, self.out_dim, 1)
-
         self.init_weight()
     def init_weight(self):
         torch.nn.init.normal_(self.encoder_pos, std=.02)
         torch.nn.init.normal_(self.ddpm_pos, std=.02)
-        torch.nn.init.normal_(self.decoder_pos, std=.02)
 
     def sample_orders(self,bsz, length):
         # generate a batch of random generation orders
@@ -604,11 +601,15 @@ class Unet1d(nn.Module):
             cond_x = x.clone()
             cond_x += self.encoder_pos
 
-            cond_x = cond_x[mask.nonzero(as_tuple=True)].reshape(B,1,-1)
+            cond_x = x[mask.nonzero(as_tuple=True)].reshape(B,1,-1)
+            # cond_x = cond_x * mask + (1-mask) * mask_tokens
+            # cond_x = cond_x[mask.nonzero(as_tuple=True)]
+            # print(f"check: {cur_mask_ratio}:{cond_x.shape}")
+
             cond_x = self.mask_encoder(cond_x)
             x_after_pad = mask_tokens.clone()
             x_after_pad[mask.nonzero(as_tuple=True)] = cond_x.reshape(-1)
-            x_after_pad += self.decoder_pos
+            # x_after_pad += self.decoder_pos
             decoder_x = self.mask_decoder(x_after_pad)
         # cond_x = self.mask_encoder(cond_x)
         age_embedding = self.age_embedding(age)
@@ -616,7 +617,7 @@ class Unet1d(nn.Module):
         # for f in (x, decoder_x, age_embedding, sex_embedding):
         #     print(f.shape)
         # exit()
-        decoder_x += self.ddpm_pos
+        # x += self.ddpm_pos
         x = torch.cat((x, decoder_x, age_embedding, sex_embedding), dim = 1)
         x = self.init_conv(x)
         r = x.clone()

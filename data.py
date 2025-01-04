@@ -67,9 +67,9 @@ def normalize_inference(arr):
 class Task1Data(data.Dataset):
 
     def __init__(self, mask_ratio = 0.1,is_train=False):
-        file_list = ['/home/yyang/work/mae_nm/data/hcpa.npz', \
-                     "/home/yyang/work/mae_nm/data/fcon.npz", \
-                     "/home/yyang/work/mae_nm/data/camcan.npz", \
+        file_list = ['data/hcpa.npz', \
+                     "data/fcon.npz", \
+                     "data/camcan.npz", \
                      ]
 
         self.ct_feas = []
@@ -111,7 +111,7 @@ class Task1Data(data.Dataset):
 class Task2Data(data.Dataset):
 
     def __init__(self, mask_ratio = 0.1):
-        dt = np.load("/home/yyang/work/mae_nm/data/abide1.npz",allow_pickle = True)
+        dt = np.load("data/abide1.npz",allow_pickle = True)
         dt_ct, dt_age, dt_sex,dt_dx = filter_age(dt,is_test = True)
 
         self.ct_feas = normalize_inference(dt_ct)
@@ -144,7 +144,7 @@ def filter_label(no, lbl, *args):
 class Task3Data(data.Dataset):
 
     def __init__(self, no=1):
-        dt = np.load("/home/yyang/work/mae_nm/data/adni.npz",allow_pickle = True)
+        dt = np.load("data/adni.npz",allow_pickle = True)
         dt_ct, dt_age, dt_sex,dt_dx = filter_age(dt,is_test = True)
 
         self.ct_feas = normalize_inference(dt_ct)

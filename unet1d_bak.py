@@ -546,12 +546,10 @@ class Unet1d(nn.Module):
 
         self.final_res_block = block_klass(dim * 2, dim, time_emb_dim = time_dim)
         self.final_conv = nn.Conv1d(dim, self.out_dim, 1)
-
-        self.init_weight()
     def init_weight(self):
         torch.nn.init.normal_(self.encoder_pos, std=.02)
+        torch.nn.init.normal_(self.docer_pos, std=.02)
         torch.nn.init.normal_(self.ddpm_pos, std=.02)
-        torch.nn.init.normal_(self.decoder_pos, std=.02)
 
     def sample_orders(self,bsz, length):
         # generate a batch of random generation orders
@@ -605,6 +603,10 @@ class Unet1d(nn.Module):
             cond_x += self.encoder_pos
 
             cond_x = cond_x[mask.nonzero(as_tuple=True)].reshape(B,1,-1)
+            # cond_x = cond_x * mask + (1-mask) * mask_tokens
+            # cond_x = cond_x[mask.nonzero(as_tuple=True)]
+            # print(f"check: {cur_mask_ratio}:{cond_x.shape}")
+
             cond_x = self.mask_encoder(cond_x)
             x_after_pad = mask_tokens.clone()
             x_after_pad[mask.nonzero(as_tuple=True)] = cond_x.reshape(-1)

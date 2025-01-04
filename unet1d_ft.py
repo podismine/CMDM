@@ -478,8 +478,8 @@ class Unet1d(nn.Module):
         # mask part
         self.mask_ratio = mask_ratio
         self.mask_embed = nn.Parameter(torch.zeros([1, 1, 1]))
-        # self.mask_encoder = Encoder2(64,dim_mults = (1,4)) #Encoder(dim, 256)
-        self.mask_encoder = Encoder(hidden_size=256) #Encoder(dim, 256)
+        self.mask_encoder = Encoder2(64,dim_mults = (1,4)) #Encoder(dim, 256)
+        # self.mask_encoder = Encoder(hidden_size=256) #Encoder(dim, 256)
         self.mask_decoder = Encoder(hidden_size=256) #Encoder(dim, 256)
 
         self.encoder_pos = nn.Parameter(torch.zeros(1, 1, dim))
@@ -593,6 +593,7 @@ class Unet1d(nn.Module):
             mask = None
             cond_x += self.encoder_pos
             cond_x = self.mask_encoder(cond_x)
+            cond_x += self.decoder_pos
             decoder_x = self.mask_decoder(cond_x)
         else:
             num_masked_tokens = int(np.ceil(self.dim * cur_mask_ratio))
