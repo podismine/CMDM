@@ -79,7 +79,8 @@ class ConditionalUNet1D(nn.Module):
             nn.Linear(hidden_dim, hidden_dim)
         )
         self.condition_fusion = nn.Sequential(
-            nn.Linear(hidden_dim + condition_dim, hidden_dim),
+            nn.Linear(condition_dim, hidden_dim),
+            # nn.Linear(hidden_dim + condition_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
@@ -106,10 +107,10 @@ class ConditionalUNet1D(nn.Module):
         x = self.init_proj(x)  # (B, hidden_dim)
         cond_emb = self.condition_embed(age, sex)
         # Process condition
-        cond = self.condition_proj(condition)  # (B, hidden_dim)
+        # cond = self.condition_proj(condition)  # (B, hidden_dim)
 
-        cond = self.condition_fusion(
-            torch.cat([cond, cond_emb], dim=1)
+        cond = self.condition_fusion(cond_emb
+            # torch.cat([cond, cond_emb], dim=1)
         )
         x = x + cond  # Add condition information
         
@@ -188,15 +189,30 @@ class MaskedDDPM1D(nn.Module):
         self.betas = torch.linspace(beta_start, beta_end, n_timesteps).cuda()
         self.alphas = 1. - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0).cuda()
-        
+        self.device='cuda'
         # 定义模型
         self.model = ConditionalUNet1D(input_dim=input_dim).cuda()
         
-    # def forward(self, x, mask, t):
-    #     # mask shape: (B, 64)
-    #     # x shape: (B, 64)
-    #     condition = torch.cat([x * mask, mask], dim=1)  # (B, 128)
-    #     return self.model(x, condition, t)
+        # def forward(self, x, mask, t):
+        #     # mask shape: (B, 64)
+        #     # x shape: (B, 64)
+        #     condition = torch.cat([x * mask, mask], dim=1)  # (B, 128)
+        #     return self.model(x, condition, t)
+        # population loss
+        self.num_classes = 100
+        self.lambda_moment = 1.0
+        self.lambda_dist = 0.1
+        self.lambda_cov = 0.1
+        self.min_samples = 2
+        
+        # 维护每个类别的滑动统计量
+        self.register_buffer('running_mean', torch.zeros(2,100, 64))
+        self.register_buffer('running_var', torch.ones(2,100, 64))
+        self.register_buffer('running_skew', torch.zeros(2,100, 64))
+        self.register_buffer('running_kurt', torch.zeros(2,100, 64))
+        self.register_buffer('running_cov', torch.zeros(2,100, 64, 64))
+        self.register_buffer('update_counts', torch.zeros(2,100))
+        self.momentum = 0.1
     def forward(self, x, mask, t, age, sex):
         # x: (B, 64)
         # mask: (B, 64)
@@ -234,48 +250,7 @@ class MaskedDDPM1D(nn.Module):
             
         return x
 
-
-class SPL(object):
-    def __init__(self, epochs = 500, init_rate = 0.25, end_rate = 1.0):
-        super().__init__()
-        self.losses = []
-        self.init_rate = init_rate
-        self.end_rate = end_rate
-        self.all_epochs = epochs
-    def update(self,losses, cur_epoch):
-        # self.losses.extend(losses.detach().cpu().tolist())
-        # loss_tensor = torch.tensor(self.losses)
-
-        # cur_rate = min(cur_epoch / self.all_epochs * (self.end_rate - self.init_rate) + self.init_rate, 1.0)
-        # threshold = torch.quantile(loss_tensor, cur_rate)
-        if cur_epoch > 10 and cur_epoch < self.all_epochs:
-            threshold = 0.2 - 0.18 / self.all_epochs * cur_epoch
-            weights = (threshold - losses.detach()) #/ (torch.quantile(loss_tensor, 1.0) - torch.quantile(loss_tensor, 0.0))
-            weights[weights < 0] = 0
-            weights = weights / threshold
-            weights[weights > 1] = 1
-        else:
-            weights = torch.ones_like(losses).to(losses.device)
-
-        # weights = threshold - losses.detach()
-        # weights[weights>0]=1
-        # weights[weights<0]=0
-
-        # weights =torch.sigmoid(threshold - losses).detach()
-        
-        # -0.5 0 0.5   
-        # min = threshold - torch.quantile(loss_tensor, 0.0) 0 - max
-        # max = threshold - torch.quantile(loss_tensor, 1.0) -max - 0 
-        #weights[weights>0.5] = 1
-        # weights = (threshold - losses) / (threshold - torch.quantile(loss_tensor, 0.0))
-        # weights = threshold - losses
-        # weights[weights < 0] = 0
-        # weights[weights > 0] = 1
-        # print(weights); exit()
-        self.losses = []
-        return weights
-
-def train_step(model, optimizer, x, mask, age, sex,spl,epoch, device):
+def train_step(model, optimizer, x, mask, age, sex, device):
     batch_size = x.shape[0]
     
     t = torch.randint(0, 1000, (batch_size,), device=device)
@@ -285,106 +260,54 @@ def train_step(model, optimizer, x, mask, age, sex,spl,epoch, device):
     noisy_sample = torch.sqrt(alphas_cumprod) * x + torch.sqrt(1 - alphas_cumprod) * noise
     noise_pred = model(noisy_sample, mask, t, age, sex)
     
-    loss_all = F.mse_loss(noise_pred, noise, reduction='none').mean(1)
-    weights = spl.update(loss_all, epoch).to(t.device)
-    loss = (loss_all * weights).sum() / weights.sum()
-    # loss = (loss_all).mean()
+    loss = F.mse_loss(noise_pred, noise)
     
     optimizer.zero_grad()
     loss.backward()
-    # grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     optimizer.step()
     
     return loss.item(), grad_norm.item()
-
-
 import argparse
 def parse_args():
     parser = argparse.ArgumentParser(description="fmri tokenizer")
 
     parser.add_argument('-m', "--mask", type=float)
     parser.add_argument('-s', "--seed", type=int, default=42)
+    parser.add_argument('-l', "--lam", type=float, default=0.01)
     parser.add_argument("--name", type=str,default='run_final')
+    parser.add_argument("--mo", type=float, default=0.1)
 
     args = parser.parse_args()
 
     return args
-
 if __name__ == "__main__":
     args = parse_args()
-    name = f'{args.name}_{args.mask}'
-    log_dir = f"logs/log_{args.name}_{args.mask}"
-    checkpoint_dir = f"checkpoint/checkpoint_{args.name}_{args.mask}"
-    writer = SummaryWriter(log_dir=log_dir)
-
-    def try_do(func, *args, **kwargs):
-        try:
-            func(*args, **kwargs)
-        except Exception as e:
-            print(f"Error: {e}")
-
-    try_do(os.makedirs, log_dir)
-    try_do(os.makedirs, checkpoint_dir)
-    spl = SPL(epochs = 1500, init_rate = 0.05, end_rate = 1.0)
+    name = f"search_param{args.lam}_mom{args.mo}"
+    log_dir = f"logs_search/log_{name}"
+    checkpoint_dir = f"checkpoint/checkpoint_{name}"
     model = MaskedDDPM1D(input_dim=64).cuda()
 
-
-    optimizer = torch.optim.AdamW(model.parameters())
-    # loss = train_step(model, optimizer, x, mask, device='cpu')
-    # samples = model.sample(x, mask)
-    from torch.optim.lr_scheduler import MultiStepLR
-
-    scheduler = MultiStepLR(
-        optimizer,
-        milestones = [1000,1500],  # 在1/3和2/3处降低学习率
-        # milestones = [500,1000],  # 在1/3和2/3处降低学习率
-        gamma=0.1 #0.001,1e-4,1e-5,1e-6
-    )
-    train_dataset = Task1Data(is_train=True)
-    train_loader = DataLoader(train_dataset, batch_size=512,num_workers=8,shuffle=False)
-
-    best_train_loss = 99999.
+    checkpoint = torch.load(f"{checkpoint_dir}/last_model.pth", map_location='cpu',weights_only=True)
+    model.load_state_dict(checkpoint)
+    model.cuda().eval()
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    mask_ratio = args.mask
-    cc = 0
-    for epoch_counter in range(2000):
-        n_steps = 50
-        total_train_loss = 0.
-        total_val_loss = 0.
-        count = 0.
 
-        model.train()
-        for step, (x, age, sex) in enumerate(train_loader):
-            # padded_tensor = F.pad(tensor, (0, 2))
-            x = x.to(device,non_blocking=True).float()[...,0]#[:,None]
-            x = F.pad(x,(0,2))
+    for sex in [0,1]:
+        for age in range(100):
+            print(f"Conducting... {sex} {age}")
+            batch = 512
+            age_torch = torch.Tensor([age]*batch).to(device,non_blocking=True).float().view(-1,1) / 100
+            sex_torch = torch.Tensor([sex]*batch).to(device,non_blocking=True).long().view(-1)
 
-            mask = torch.ones_like(x).to(device,non_blocking=True)
-            num_masked_tokens = int(62 * mask_ratio)
-            for i in range(x.size(0)):
-                masked_indices = torch.randperm(62)[:num_masked_tokens]
-                mask[i, masked_indices] = 0
+            mask = torch.ones((batch, 64)).to(device,non_blocking=True)
+            samples = model.sample(mask, age_torch, sex_torch, device = device)
 
-            age = age.to(device,non_blocking=True).float().view(-1,1) / 100
-            sex = sex.to(device,non_blocking=True).long().view(-1)
+            to_save = samples.detach().cpu().numpy()
+            save_root = f'res/{name}'
+            if not os.path.exists(save_root):
+                os.makedirs(save_root)
+            np.save(f"{save_root}/large_sex-{sex}_age-{age}.npy",to_save)
 
-            loss, grad_norm = train_step(model, optimizer, x, mask, age, sex,spl,epoch_counter, device=device)
-            # torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=1)
-            writer.add_scalar('grad_norm', grad_norm, global_step = cc);cc+=1
-            total_train_loss += len(x) * float(loss)
-            count += len(x)
-
-        scheduler.step()
-        total_train_loss /= count
-        print(f"[{epoch_counter}]: train_loss: {total_train_loss:.4f}")
-        writer.add_scalar('total_train_loss', total_train_loss, global_step=epoch_counter)
-
-        if epoch_counter % 100 == 0:
-            torch.save(model.state_dict(), os.path.join(f"{checkpoint_dir}/{epoch_counter}_model.pth"))
-
-        if best_train_loss > total_train_loss:
-            best_train_loss = total_train_loss
-            torch.save(model.state_dict(), os.path.join(f"{checkpoint_dir}/best_model.pth"))
-
-    torch.save(model.state_dict(), os.path.join(f"{checkpoint_dir}/last_model.pth"))
+            del mask, samples

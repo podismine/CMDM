@@ -115,7 +115,6 @@ class Task2Data(data.Dataset):
         dt_ct, dt_age, dt_sex,dt_dx = filter_age(dt,is_test = True)
 
         self.ct_feas = normalize_inference(dt_ct)
-        self.ct_feas = dt_ct
         self.ages = dt_age
         self.sexs = dt_sex
         self.dx = np.array([1 if f ==1 else 0 for f in dt_dx])#raw 1 asd 2 nc
@@ -148,7 +147,6 @@ class Task3Data(data.Dataset):
         dt_ct, dt_age, dt_sex,dt_dx = filter_age(dt,is_test = True)
 
         self.ct_feas = normalize_inference(dt_ct)
-        self.ct_feas = dt_ct
         self.ages = dt_age
         self.sexs = dt_sex
         self.dx = dt_dx

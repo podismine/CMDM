@@ -3,3 +3,12 @@ logs/
 checkpoint/
 mask_res*
 res
+*.npz
+*.pkl
+*.pth
+clf_res/
+clf_res/
+logs_flow/
+logs_search/
+run_logs/
+

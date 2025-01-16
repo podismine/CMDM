@@ -79,7 +79,8 @@ class ConditionalUNet1D(nn.Module):
             nn.Linear(hidden_dim, hidden_dim)
         )
         self.condition_fusion = nn.Sequential(
-            nn.Linear(hidden_dim + condition_dim, hidden_dim),
+            nn.Linear(condition_dim, hidden_dim),
+            # nn.Linear(hidden_dim + condition_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
@@ -106,11 +107,12 @@ class ConditionalUNet1D(nn.Module):
         x = self.init_proj(x)  # (B, hidden_dim)
         cond_emb = self.condition_embed(age, sex)
         # Process condition
-        cond = self.condition_proj(condition)  # (B, hidden_dim)
+        #cond = self.condition_proj(condition)  # (B, hidden_dim)
 
-        cond = self.condition_fusion(
-            torch.cat([cond, cond_emb], dim=1)
-        )
+        # cond = self.condition_fusion(
+        #     torch.cat([cond, cond_emb], dim=1)
+        # )
+        cond = self.condition_fusion(cond_emb)
         x = x + cond  # Add condition information
         
         # Encoder
@@ -182,7 +184,7 @@ class ResnetBlock1D(nn.Module):
         return h + self.shortcut(x)
 from tqdm import tqdm
 class MaskedDDPM1D(nn.Module):
-    def __init__(self, input_dim=64, beta_start=1e-4, beta_end=0.02, n_timesteps=1000):
+    def __init__(self, input_dim=64, beta_start=1e-4, beta_end=0.02, n_timesteps=1000,momentum=0.1):
         super().__init__()
         # 定义noise schedule
         self.betas = torch.linspace(beta_start, beta_end, n_timesteps).cuda()
@@ -191,12 +193,129 @@ class MaskedDDPM1D(nn.Module):
         
         # 定义模型
         self.model = ConditionalUNet1D(input_dim=input_dim).cuda()
+
+        # population loss
+        self.num_classes = 100
+        self.lambda_moment = 1.0
+        self.lambda_dist = 0.1
+        self.lambda_cov = 0.1
+        self.min_samples = 5
         
+        # 维护每个类别的滑动统计量
+        self.register_buffer('running_mean', torch.zeros(2,100, 64))
+        self.register_buffer('running_var', torch.ones(2,100, 64))
+        self.register_buffer('running_skew', torch.zeros(2,100, 64))
+        self.register_buffer('running_kurt', torch.zeros(2,100, 64))
+        self.register_buffer('running_cov', torch.zeros(2,100, 64, 64))
+        self.register_buffer('update_counts', torch.zeros(2,100))
+        self.momentum = momentum
     # def forward(self, x, mask, t):
     #     # mask shape: (B, 64)
     #     # x shape: (B, 64)
     #     condition = torch.cat([x * mask, mask], dim=1)  # (B, 128)
     #     return self.model(x, condition, t)
+    def update_running_stats(self, x, age, sex):
+        """更新类别统计量"""
+        # print(age, sex); exit()
+        for sex_  in range(2):
+            for age_ in range(100):
+                mask = (age == age_) & (sex ==sex_)
+                if mask.sum() >= self.min_samples:
+                    # print("Update. ", mask.sum())
+                    x_c = x[mask]
+                    
+                    # 更新均值和方差
+                    mean_c = x_c.mean(0)
+                    var_c = x_c.var(0)
+                    self.running_mean[sex_,age_] = (1 - self.momentum) * self.running_mean[sex_,age_] + self.momentum * mean_c
+                    self.running_var[sex_,age_] = (1 - self.momentum) * self.running_var[sex_,age_] + self.momentum * var_c
+                    
+                    # 更新偏度和峰度
+                    x_centered = x_c - mean_c
+                    std_c = torch.sqrt(var_c + 1e-8)
+                    skew_c = torch.mean(torch.pow(x_centered / (std_c + 1e-8), 3), dim=0)
+                    kurt_c = torch.mean(torch.pow(x_centered / (std_c + 1e-8), 4), dim=0) - 3.0
+                    self.running_skew[sex_,age_] = (1 - self.momentum) * self.running_skew[sex_,age_] + self.momentum * skew_c
+                    self.running_kurt[sex_,age_] = (1 - self.momentum) * self.running_kurt[sex_,age_] + self.momentum * kurt_c
+                    
+                    # 更新协方差
+                    cov_c = self.compute_covariance_matrix(x_c)
+                    self.running_cov[sex_,age_] = (1 - self.momentum) * self.running_cov[sex_,age_] + self.momentum * cov_c
+                    
+                    self.update_counts[sex_,age_] += 1
+    def compute_covariance_matrix(self, x):
+        x_centered = x - x.mean(dim=0, keepdim=True)
+        factor = 1.0 / (x.size(0) - 1)
+        return factor * x_centered.t() @ x_centered
+    
+    def conditional_moment_loss(self, pred_noise, age, sex):
+        """基于running statistics的条件统计矩损失"""
+        loss = 0
+        count = 0
+        
+        # for c in range(self.num_classes):
+        for sex_ in range(2):
+            for age_ in range(100):
+                mask = (age == age_) & (sex ==sex_)
+                # mask = (cond == c)
+                if mask.sum() >= self.min_samples:
+                    pred_c = pred_noise[mask]
+                    
+                    # 计算当前batch的统计量
+                    mean_c = pred_c.mean(0)
+                    var_c = pred_c.var(0)
+                    x_centered = pred_c - mean_c
+                    std_c = torch.sqrt(var_c + 1e-8)
+                    skew_c = torch.mean(torch.pow(x_centered / (std_c + 1e-8), 3), dim=0)
+                    kurt_c = torch.mean(torch.pow(x_centered / (std_c + 1e-8), 4), dim=0) - 3.0
+                    
+                    # 与running statistics比较
+                    if self.update_counts[sex_,age_] > 0:
+                        loss += F.mse_loss(mean_c, self.running_mean[sex_,age_])
+                        loss += F.mse_loss(var_c, self.running_var[sex_,age_])
+                        loss += F.mse_loss(skew_c, self.running_skew[sex_,age_])
+                        loss += F.mse_loss(kurt_c, self.running_kurt[sex_,age_])
+                        count += 1
+                    
+        return loss / max(count, 1)
+    
+    def conditional_distribution_loss(self, pred_noise, age, sex):
+        """条件分布约束"""
+        loss = 0
+        count = 0
+        for sex_ in range(2):
+            for age_ in range(100):
+                mask = (age == age_) & (sex ==sex_)
+        # for c in range(self.num_classes):
+        #     mask = (cond == c)
+                if mask.sum() >= self.min_samples and self.update_counts[sex_,age_] > 0:
+                    pred_c = pred_noise[mask]
+                    
+                    # 使用running statistics计算归一化的KL散度
+                    mean_c = self.running_mean[sex_,age_]
+                    std_c = torch.sqrt(self.running_var[sex_,age_] + 1e-8)
+                    log_prob = -0.5 * ((pred_c - mean_c) / (std_c + 1e-8)) ** 2 - torch.log(std_c + 1e-8)
+                    loss += -log_prob.mean()
+                    count += 1
+                
+        return loss / max(count, 1)
+
+    def conditional_covariance_loss(self, pred_noise, age, sex):
+        """条件协方差损失"""
+        loss = 0
+        count = 0
+        for sex_ in range(2):
+            for age_ in range(100):
+                mask = (age == age_) & (sex ==sex_)
+        # for c in range(self.num_classes):
+        #     mask = (cond == c)
+                if mask.sum() >= self.min_samples and self.update_counts[sex_,age_] > 0:
+                    pred_c = pred_noise[mask]
+                    cov_c = self.compute_covariance_matrix(pred_c)
+                    loss += torch.norm(cov_c - self.running_cov[sex_,age_], p='fro')
+                    count += 1
+                
+        return loss / max(count, 1)
     def forward(self, x, mask, t, age, sex):
         # x: (B, 64)
         # mask: (B, 64)
@@ -243,26 +362,19 @@ class SPL(object):
         self.end_rate = end_rate
         self.all_epochs = epochs
     def update(self,losses, cur_epoch):
-        # self.losses.extend(losses.detach().cpu().tolist())
-        # loss_tensor = torch.tensor(self.losses)
-
-        # cur_rate = min(cur_epoch / self.all_epochs * (self.end_rate - self.init_rate) + self.init_rate, 1.0)
-        # threshold = torch.quantile(loss_tensor, cur_rate)
-        if cur_epoch > 10 and cur_epoch < self.all_epochs:
-            threshold = 0.2 - 0.18 / self.all_epochs * cur_epoch
-            weights = (threshold - losses.detach()) #/ (torch.quantile(loss_tensor, 1.0) - torch.quantile(loss_tensor, 0.0))
-            weights[weights < 0] = 0
-            weights = weights / threshold
-            weights[weights > 1] = 1
-        else:
-            weights = torch.ones_like(losses).to(losses.device)
+        self.losses.extend(losses.detach().cpu().tolist())
+        loss_tensor = torch.tensor(self.losses)
+        cur_rate = min(cur_epoch / self.all_epochs * (self.end_rate - self.init_rate) + self.init_rate, 1.0)
+        threshold = torch.quantile(loss_tensor, cur_rate)
 
         # weights = threshold - losses.detach()
         # weights[weights>0]=1
         # weights[weights<0]=0
 
         # weights =torch.sigmoid(threshold - losses).detach()
-        
+        weights = (threshold - losses.detach()) #/ (torch.quantile(loss_tensor, 1.0) - torch.quantile(loss_tensor, 0.0))
+        weights[weights < 0] = 0
+        weights = weights / weights.max()
         # -0.5 0 0.5   
         # min = threshold - torch.quantile(loss_tensor, 0.0) 0 - max
         # max = threshold - torch.quantile(loss_tensor, 1.0) -max - 0 
@@ -275,7 +387,7 @@ class SPL(object):
         self.losses = []
         return weights
 
-def train_step(model, optimizer, x, mask, age, sex,spl,epoch, device):
+def train_step(model, optimizer, x, mask, age, sex,spl,lam,epoch, device):
     batch_size = x.shape[0]
     
     t = torch.randint(0, 1000, (batch_size,), device=device)
@@ -284,38 +396,48 @@ def train_step(model, optimizer, x, mask, age, sex,spl,epoch, device):
     alphas_cumprod = model.alphas_cumprod[t][:, None]
     noisy_sample = torch.sqrt(alphas_cumprod) * x + torch.sqrt(1 - alphas_cumprod) * noise
     noise_pred = model(noisy_sample, mask, t, age, sex)
+    with torch.no_grad():
+        model.update_running_stats(noisy_sample, (age*100).long().view(-1), sex)
     
     loss_all = F.mse_loss(noise_pred, noise, reduction='none').mean(1)
     weights = spl.update(loss_all, epoch).to(t.device)
-    loss = (loss_all * weights).sum() / weights.sum()
-    # loss = (loss_all).mean()
+    loss_spl = (loss_all * weights).sum() / weights.sum()
+
+    moment_loss = model.conditional_moment_loss(noise_pred, (age*100).long().view(-1), sex)
+        
+    # 条件分布约束
+    dist_loss = model.conditional_distribution_loss(noise_pred, (age*100).long().view(-1), sex)
     
+    # 条件协方差损失
+    cov_loss = model.conditional_covariance_loss(noise_pred, (age*100).long().view(-1), sex)
+    
+    loss = loss_spl + 0.01 * lam * moment_loss + 0.025 * lam *dist_loss + 0.0005* lam*cov_loss
+    # print(f"moment_loss:{0.01*lam* moment_loss:.4f} dist_loss:{0.025 *lam*dist_loss:.4f} cov_loss:{0.0005*lam*cov_loss:.4f}")
     optimizer.zero_grad()
     loss.backward()
     # grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
     optimizer.step()
     
-    return loss.item(), grad_norm.item()
-
-
+    return loss_spl.item(), grad_norm.item()
 import argparse
 def parse_args():
     parser = argparse.ArgumentParser(description="fmri tokenizer")
 
     parser.add_argument('-m', "--mask", type=float)
     parser.add_argument('-s', "--seed", type=int, default=42)
+    parser.add_argument('-l', "--lam", type=float, default=0.1)
+    parser.add_argument("--mo", type=float, default=0.1)
     parser.add_argument("--name", type=str,default='run_final')
 
     args = parser.parse_args()
 
     return args
-
 if __name__ == "__main__":
     args = parse_args()
-    name = f'{args.name}_{args.mask}'
-    log_dir = f"logs/log_{args.name}_{args.mask}"
-    checkpoint_dir = f"checkpoint/checkpoint_{args.name}_{args.mask}"
+    name = f"search_param{args.lam}_mom{args.mo}"
+    log_dir = f"logs_search/log_{name}"
+    checkpoint_dir = f"checkpoint/checkpoint_{name}"
     writer = SummaryWriter(log_dir=log_dir)
 
     def try_do(func, *args, **kwargs):
@@ -326,8 +448,8 @@ if __name__ == "__main__":
 
     try_do(os.makedirs, log_dir)
     try_do(os.makedirs, checkpoint_dir)
-    spl = SPL(epochs = 1500, init_rate = 0.05, end_rate = 1.0)
-    model = MaskedDDPM1D(input_dim=64).cuda()
+    spl = SPL(epochs = 1000, init_rate = 0.25, end_rate = 1.0)
+    model = MaskedDDPM1D(input_dim=64,momentum=args.mo).cuda()
 
 
     optimizer = torch.optim.AdamW(model.parameters())
@@ -337,16 +459,16 @@ if __name__ == "__main__":
 
     scheduler = MultiStepLR(
         optimizer,
-        milestones = [1000,1500],  # 在1/3和2/3处降低学习率
+        milestones = [1100,1600],  # 在1/3和2/3处降低学习率
         # milestones = [500,1000],  # 在1/3和2/3处降低学习率
         gamma=0.1 #0.001,1e-4,1e-5,1e-6
     )
     train_dataset = Task1Data(is_train=True)
-    train_loader = DataLoader(train_dataset, batch_size=512,num_workers=8,shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=512*2,num_workers=8,shuffle=False)
 
     best_train_loss = 99999.
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    mask_ratio = args.mask
+    mask_ratio = 0.
     cc = 0
     for epoch_counter in range(2000):
         n_steps = 50
@@ -361,15 +483,15 @@ if __name__ == "__main__":
             x = F.pad(x,(0,2))
 
             mask = torch.ones_like(x).to(device,non_blocking=True)
-            num_masked_tokens = int(62 * mask_ratio)
-            for i in range(x.size(0)):
-                masked_indices = torch.randperm(62)[:num_masked_tokens]
-                mask[i, masked_indices] = 0
+            # num_masked_tokens = int(62 * mask_ratio)
+            # for i in range(x.size(0)):
+            #     masked_indices = torch.randperm(62)[:num_masked_tokens]
+            #     mask[i, masked_indices] = 0
 
             age = age.to(device,non_blocking=True).float().view(-1,1) / 100
             sex = sex.to(device,non_blocking=True).long().view(-1)
 
-            loss, grad_norm = train_step(model, optimizer, x, mask, age, sex,spl,epoch_counter, device=device)
+            loss, grad_norm = train_step(model, optimizer, x, mask, age, sex,spl,args.lam, epoch_counter, device=device)
             # torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=1)
             writer.add_scalar('grad_norm', grad_norm, global_step = cc);cc+=1
             total_train_loss += len(x) * float(loss)

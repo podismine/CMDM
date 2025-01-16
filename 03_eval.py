@@ -253,11 +253,22 @@ def train_step(model, optimizer, x, mask, age, sex, device):
     optimizer.step()
     
     return loss.item(), grad_norm.item()
+import argparse
+def parse_args():
+    parser = argparse.ArgumentParser(description="fmri tokenizer")
 
+    parser.add_argument('-m', "--mask", type=float)
+    parser.add_argument('-s', "--seed", type=int, default=42)
+    parser.add_argument("--name", type=str,default='run_final')
+
+    args = parser.parse_args()
+
+    return args
 if __name__ == "__main__":
-    name = "mask_addSP_run7_soft_spl_ft"
-    log_dir = f"logs/log_{name}"
-    checkpoint_dir = f"checkpoint/checkpoint_{name}"
+    args = parse_args()
+    name = f'{args.name}_{args.mask}'
+    log_dir = f"logs/log_{args.name}_{args.mask}"
+    checkpoint_dir = f"checkpoint/checkpoint_{args.name}_{args.mask}"
     model = MaskedDDPM1D(input_dim=64).cuda()
 
     checkpoint = torch.load(f"{checkpoint_dir}/last_model.pth", map_location='cpu',weights_only=True)

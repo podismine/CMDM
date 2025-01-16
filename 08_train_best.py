@@ -243,26 +243,19 @@ class SPL(object):
         self.end_rate = end_rate
         self.all_epochs = epochs
     def update(self,losses, cur_epoch):
-        # self.losses.extend(losses.detach().cpu().tolist())
-        # loss_tensor = torch.tensor(self.losses)
-
-        # cur_rate = min(cur_epoch / self.all_epochs * (self.end_rate - self.init_rate) + self.init_rate, 1.0)
-        # threshold = torch.quantile(loss_tensor, cur_rate)
-        if cur_epoch > 10 and cur_epoch < self.all_epochs:
-            threshold = 0.2 - 0.18 / self.all_epochs * cur_epoch
-            weights = (threshold - losses.detach()) #/ (torch.quantile(loss_tensor, 1.0) - torch.quantile(loss_tensor, 0.0))
-            weights[weights < 0] = 0
-            weights = weights / threshold
-            weights[weights > 1] = 1
-        else:
-            weights = torch.ones_like(losses).to(losses.device)
+        self.losses.extend(losses.detach().cpu().tolist())
+        loss_tensor = torch.tensor(self.losses)
+        cur_rate = min(cur_epoch / self.all_epochs * (self.end_rate - self.init_rate) + self.init_rate, 1.0)
+        threshold = torch.quantile(loss_tensor, cur_rate)
 
         # weights = threshold - losses.detach()
         # weights[weights>0]=1
         # weights[weights<0]=0
 
         # weights =torch.sigmoid(threshold - losses).detach()
-        
+        weights = (threshold - losses.detach()) #/ (torch.quantile(loss_tensor, 1.0) - torch.quantile(loss_tensor, 0.0))
+        weights[weights < 0] = 0
+        weights = weights / weights.max()
         # -0.5 0 0.5   
         # min = threshold - torch.quantile(loss_tensor, 0.0) 0 - max
         # max = threshold - torch.quantile(loss_tensor, 1.0) -max - 0 
@@ -297,8 +290,6 @@ def train_step(model, optimizer, x, mask, age, sex,spl,epoch, device):
     optimizer.step()
     
     return loss.item(), grad_norm.item()
-
-
 import argparse
 def parse_args():
     parser = argparse.ArgumentParser(description="fmri tokenizer")
@@ -310,12 +301,11 @@ def parse_args():
     args = parser.parse_args()
 
     return args
-
 if __name__ == "__main__":
     args = parse_args()
-    name = f'{args.name}_{args.mask}'
-    log_dir = f"logs/log_{args.name}_{args.mask}"
-    checkpoint_dir = f"checkpoint/checkpoint_{args.name}_{args.mask}"
+    name = f"mask_addSP_run9_spl_norm_rerun2_mask{args.mask}"
+    log_dir = f"logs/log_{name}"
+    checkpoint_dir = f"checkpoint/checkpoint_{name}"
     writer = SummaryWriter(log_dir=log_dir)
 
     def try_do(func, *args, **kwargs):
@@ -326,7 +316,7 @@ if __name__ == "__main__":
 
     try_do(os.makedirs, log_dir)
     try_do(os.makedirs, checkpoint_dir)
-    spl = SPL(epochs = 1500, init_rate = 0.05, end_rate = 1.0)
+    spl = SPL(epochs = 1000, init_rate = 0.25, end_rate = 1.0)
     model = MaskedDDPM1D(input_dim=64).cuda()
 
 

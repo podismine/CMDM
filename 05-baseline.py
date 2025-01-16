@@ -286,9 +286,9 @@ def train_step(model, optimizer, x, mask, age, sex,spl,epoch, device):
     noise_pred = model(noisy_sample, mask, t, age, sex)
     
     loss_all = F.mse_loss(noise_pred, noise, reduction='none').mean(1)
-    weights = spl.update(loss_all, epoch).to(t.device)
-    loss = (loss_all * weights).sum() / weights.sum()
-    # loss = (loss_all).mean()
+    # weights = spl.update(loss_all, epoch).to(t.device)
+    # loss = (loss_all * weights).sum() / weights.sum()
+    loss = (loss_all).mean()
     
     optimizer.zero_grad()
     loss.backward()
@@ -303,9 +303,9 @@ import argparse
 def parse_args():
     parser = argparse.ArgumentParser(description="fmri tokenizer")
 
-    parser.add_argument('-m', "--mask", type=float)
+    parser.add_argument('-m', "--mask", type=float, default = 0.)
     parser.add_argument('-s', "--seed", type=int, default=42)
-    parser.add_argument("--name", type=str,default='run_final')
+    parser.add_argument("--name", type=str,default='baseline')
 
     args = parser.parse_args()
 
@@ -346,7 +346,7 @@ if __name__ == "__main__":
 
     best_train_loss = 99999.
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    mask_ratio = args.mask
+    mask_ratio = 0.
     cc = 0
     for epoch_counter in range(2000):
         n_steps = 50

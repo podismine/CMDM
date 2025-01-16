@@ -236,37 +236,19 @@ class MaskedDDPM1D(nn.Module):
 
 
 class SPL(object):
-    def __init__(self, epochs = 500, init_rate = 0.25, end_rate = 1.0):
+    def __init__(self, epochs = 1000, init_rate = 0.5, end_rate = 1.0):
         super().__init__()
         self.losses = []
         self.init_rate = init_rate
         self.end_rate = end_rate
         self.all_epochs = epochs
     def update(self,losses, cur_epoch):
-        # self.losses.extend(losses.detach().cpu().tolist())
-        # loss_tensor = torch.tensor(self.losses)
-
-        # cur_rate = min(cur_epoch / self.all_epochs * (self.end_rate - self.init_rate) + self.init_rate, 1.0)
-        # threshold = torch.quantile(loss_tensor, cur_rate)
-        if cur_epoch > 10 and cur_epoch < self.all_epochs:
-            threshold = 0.2 - 0.18 / self.all_epochs * cur_epoch
-            weights = (threshold - losses.detach()) #/ (torch.quantile(loss_tensor, 1.0) - torch.quantile(loss_tensor, 0.0))
-            weights[weights < 0] = 0
-            weights = weights / threshold
-            weights[weights > 1] = 1
-        else:
-            weights = torch.ones_like(losses).to(losses.device)
-
-        # weights = threshold - losses.detach()
-        # weights[weights>0]=1
-        # weights[weights<0]=0
-
-        # weights =torch.sigmoid(threshold - losses).detach()
-        
-        # -0.5 0 0.5   
-        # min = threshold - torch.quantile(loss_tensor, 0.0) 0 - max
-        # max = threshold - torch.quantile(loss_tensor, 1.0) -max - 0 
-        #weights[weights>0.5] = 1
+        self.losses.extend(losses.detach().cpu().tolist())
+        loss_tensor = torch.tensor(self.losses)
+        cur_rate = min(cur_epoch / self.all_epochs * (self.end_rate - self.init_rate) + self.init_rate, 1.0)
+        threshold = torch.quantile(loss_tensor, cur_rate)
+        weights =torch.sigmoid(threshold - losses).detach()
+        weights[weights>0.5] = 1
         # weights = (threshold - losses) / (threshold - torch.quantile(loss_tensor, 0.0))
         # weights = threshold - losses
         # weights[weights < 0] = 0
@@ -287,8 +269,11 @@ def train_step(model, optimizer, x, mask, age, sex,spl,epoch, device):
     
     loss_all = F.mse_loss(noise_pred, noise, reduction='none').mean(1)
     weights = spl.update(loss_all, epoch).to(t.device)
-    loss = (loss_all * weights).sum() / weights.sum()
-    # loss = (loss_all).mean()
+    # print(loss_all)
+    # print(weights)
+    # print(loss_all.shape)
+    # print(weights.shape);exit()
+    loss = (loss_all * weights).mean()
     
     optimizer.zero_grad()
     loss.backward()
@@ -298,24 +283,10 @@ def train_step(model, optimizer, x, mask, age, sex,spl,epoch, device):
     
     return loss.item(), grad_norm.item()
 
-
-import argparse
-def parse_args():
-    parser = argparse.ArgumentParser(description="fmri tokenizer")
-
-    parser.add_argument('-m', "--mask", type=float)
-    parser.add_argument('-s', "--seed", type=int, default=42)
-    parser.add_argument("--name", type=str,default='run_final')
-
-    args = parser.parse_args()
-
-    return args
-
 if __name__ == "__main__":
-    args = parse_args()
-    name = f'{args.name}_{args.mask}'
-    log_dir = f"logs/log_{args.name}_{args.mask}"
-    checkpoint_dir = f"checkpoint/checkpoint_{args.name}_{args.mask}"
+    name = "mask_addSP_run3_reweightscale_rerun"
+    log_dir = f"logs/log_{name}"
+    checkpoint_dir = f"checkpoint/checkpoint_{name}"
     writer = SummaryWriter(log_dir=log_dir)
 
     def try_do(func, *args, **kwargs):
@@ -326,7 +297,7 @@ if __name__ == "__main__":
 
     try_do(os.makedirs, log_dir)
     try_do(os.makedirs, checkpoint_dir)
-    spl = SPL(epochs = 1500, init_rate = 0.05, end_rate = 1.0)
+    spl = SPL(epochs = 1000, init_rate = 0.5, end_rate = 1.0)
     model = MaskedDDPM1D(input_dim=64).cuda()
 
 
@@ -346,7 +317,7 @@ if __name__ == "__main__":
 
     best_train_loss = 99999.
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    mask_ratio = args.mask
+    mask_ratio = 0.2
     cc = 0
     for epoch_counter in range(2000):
         n_steps = 50
